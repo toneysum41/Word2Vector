@@ -21,8 +21,12 @@ class SkipGram:
         self.embedding_size = 200  # 生成词向量的维度
         self.window_size = 5  # 考虑前后几个词，窗口大小, skipgram中的中心词-上下文pairs数目就是windowsize *2
         self.num_sampled = 100  # 负样本采样.
-        self.num_steps = 100000#定义最大迭代次数，创建并设置默认的session，开始实际训练
+        self.num_steps = 100000
         self.dataset = DataLoader().dataset
+        """
+        这里在load_data方法中原本openfile函数中时没有加 “encoding='utf-8'”的，只有加了这个才可以读取中文数据，否则
+        会报错
+        """
         self.words = self.read_data(self.dataset)
     # 定义读取数据的函数，并把数据转成列表
     def read_data(self, dataset):
@@ -35,17 +39,22 @@ class SkipGram:
         # 创建词汇表，过滤低频次词语，这里使用的人是mincount>=5，其余单词认定为Unknown,编号为0,
         # 这一步在gensim提供的wordvector中，采用的是minicount的方法
         #对原words列表中的单词使用字典中的ID进行编号，即将单词转换成整数，储存在data列表中，同时对UNK进行计数
-        count = [['UNK', -1]]
+        count = [['UNK', -1]]  #定义列表[词语，词频]
+        """
+        #统计words词语列表中各个单词的词频，>=5的加入count列表队尾
+        我们可以看出出现频率越高的词会先放到list中，这会帮助到后面的负采样方法，也就是当词的编号值越大时，它被选取为
+        负采样样本的概率越低，反之越高
+        """
         count.extend([item for item in collections.Counter(words).most_common() if item[1] >= min_count])
         dictionary = dict()
         for word, _ in count:
-            dictionary[word] = len(dictionary)
-        data = list()
+            dictionary[word] = len(dictionary)  #将count列表中的词语按顺序编号
+        data = list()  #编号列表
         unk_count = 0
         for word in words:
-            if word in dictionary:
+            if word in dictionary:  #如果word在筛选过的dictionary中存在，记录此词语编号加入data
                 index = dictionary[word]
-            else:
+            else:  #否则unknown + 1
                 index = 0
                 unk_count += 1
             data.append(index)
@@ -74,7 +83,7 @@ class SkipGram:
         '''
         batch = np.ndarray(shape = (batch_size), dtype = np.int32) #建一个batch大小的数组，保存任意单词
         labels = np.ndarray(shape = (batch_size, 1), dtype = np.int32)#建一个（batch，1）大小的二位数组，保存任意单词前一个或者后一个单词，从而形成一个pair
-        span = 2 * window_size + 1 #窗口大小，为3，结构为[ window_size target window_size ][wn-i,wn,wn+i]
+        span = 2 * window_size + 1 #窗口大小，结构为[... window_size target window_size ...][...wn-i,wn,wn+i...]
         buffer = collections.deque(maxlen = span) #建立一个结构为双向队列的缓冲区，大小不超过3，实际上是为了构造bath以及labels，采用队列的思想
         for _ in range(span):
             buffer.append(data[self.data_index])
@@ -89,8 +98,10 @@ class SkipGram:
                 targets_to_avoid.append(target)
                 batch[i * window_size*2 + j] = buffer[window_size]
                 labels[i * window_size*2 + j, 0] = buffer[target]
+
             buffer.append(data[self.data_index])
-            self.data_index = (self.data_index + 1)%len(data)
+            self.data_index = (self.data_index + 1) % len(data)
+            #print('buffer is: ', buffer)
 
         return batch, labels
 
@@ -116,6 +127,13 @@ class SkipGram:
                 # 全连接层，Wx+b,设置W大小为，vocabulary_size×1的偏置
                 nce_biases = tf.Variable(tf.zeros([vocabulary_size]))
             #定义loss，损失函数，tf.reduce_mean求平均值，# 得到NCE损失(负采样得到的损失)
+            """
+            我们先假设输入数据是K维的，一共有N个类，tf.nn.nce_loss函数中的参数：
+            nce_loss(weights（N*K权重矩阵）, biases（N*1矩阵）, inputs（batch_size*K输入矩阵）, labels（batch_size*num_true输入标签矩阵）, 
+            num_sampled（采样出多少个负样本）, num_classes, num_true=1（ 实际的正样本个数）, sampled_values=None（采样出的负样本的值）,
+             remove_accidental_hits=False（ 如果采样时不小心采样到的负样本刚好是正样本，要不要干掉）, 
+             partition_strategy="mod"（对weights进行embedding_lookup时并行查表时的策略）, name="nce_loss")
+            """
             loss = tf.reduce_mean(tf.nn.nce_loss(weights = nce_weights,# 权重
                                                 biases = nce_biases,# 偏差
                                                 labels = train_labels,# 输入的标签
@@ -151,7 +169,7 @@ class SkipGram:
                     print("Average loss at step ", step, ":", average_loss)
                     average_loss = 0
             final_embeddings = normalized_embeddings.eval()
-
+            print(graph)
         return final_embeddings
     #保存embedding文件
     def save_embedding(self, final_embeddings, reverse_dictionary):
@@ -163,12 +181,16 @@ class SkipGram:
     def train(self):
         data, count, dictionary, reverse_dictionary = self.build_dataset(self.words, self.min_count)
         vocabulary_size = len(count)
+        """
+        这个模型的输入：（我们需要词库的大小，每次训练的样本数量，每个词向量的维度（每个维度可以理解为词的一个特征），考虑中心词汇前后词语的范围
+        （eg. window_size=5， 我们考虑目标词上下文的范围就是 [5个词语] target [五个词语]）, 负采样样本数量，训练迭代次数，输入数据（词汇表中所有有效数据的编号））
+        """
         final_embeddings = self.train_wordvec(vocabulary_size, self.batch_size, self.embedding_size, self.window_size, self.num_sampled, self.num_steps, data)
         self.save_embedding(final_embeddings, reverse_dictionary)
 
-def test():
+def runskipgram():
 
     vector = SkipGram()
     vector.train()
 
-test()
+runskipgram()
